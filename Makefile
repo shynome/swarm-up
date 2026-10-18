@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 .PHONY: build test fmt vet install version clean
 
 build:
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) .
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) .
 
 test:
 	go test ./...
@@ -17,7 +17,7 @@ vet:
 	go vet ./...
 
 install:
-	go install -trimpath -ldflags "$(LDFLAGS)" .
+	CGO_ENABLED=0 go install -trimpath -ldflags "$(LDFLAGS)" .
 
 version:
 	@echo $(VERSION)
