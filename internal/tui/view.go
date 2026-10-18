@@ -129,6 +129,7 @@ func (m *Model) viewEdit() string {
 		label("仓库") + svc.Ref.Repo,
 		"",
 		m.input.View(),
+		styleDim.Render("默认是当前 tag，直接改成新版本后回车"),
 	}
 	if m.inputErr != "" {
 		rows = append(rows, "", styleErr.Render(m.inputErr))

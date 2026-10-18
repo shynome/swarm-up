@@ -262,8 +262,9 @@ func (m *Model) listKey(key tea.KeyMsg) tea.Cmd {
 		m.newTag = ""
 		m.inputErr = ""
 		m.toast = ""
-		m.input.SetValue("")
-		m.input.Placeholder = "当前 " + svc.Ref.Tag
+		// 默认填入当前 tag，方便在其基础上改成新版本
+		m.input.SetValue(svc.Ref.Tag)
+		m.input.CursorEnd()
 		m.input.Focus()
 		m.state = stateEdit
 		return textinput.Blink
