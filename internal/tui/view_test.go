@@ -54,6 +54,41 @@ func TestBuildItemsWithoutStore(t *testing.T) {
 	}
 }
 
+func TestBuildItemsFollowsFileOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "images.yaml")
+	content := "web_cron:\n  image: acme/cron:v1\nweb_api:\n  image: acme/api:v1\nghost:\n  image: acme/ghost:v1\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("写入测试文件失败: %v", err)
+	}
+	st, err := store.Load(path)
+	if err != nil {
+		t.Fatalf("Load 报错: %v", err)
+	}
+
+	services := []docker.Service{
+		{Name: "web_api", Image: "acme/api:v1"},
+		{Name: "web_admin", Image: "acme/admin:v1"},
+		{Name: "web_cron", Image: "acme/cron:v1"},
+		{Name: "aaa_svc", Image: "acme/aaa:v1"},
+	}
+	items := buildItems(services, st)
+
+	var got []string
+	for _, it := range items {
+		got = append(got, it.svc.Name)
+	}
+	want := []string{"web_cron", "web_api", "aaa_svc", "web_admin"}
+	if len(got) != len(want) {
+		t.Fatalf("顺序 = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("顺序 = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestShortImage(t *testing.T) {
 	cases := map[string]string{
 		"acme/api:v1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "acme/api:v1#01234567",

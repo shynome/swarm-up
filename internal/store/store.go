@@ -67,6 +67,18 @@ func (s *Store) Path() string { return s.path }
 // Exists 表示文件在加载时是否已存在。
 func (s *Store) Exists() bool { return s.exists }
 
+// Order 返回文件中服务条目的定义顺序。
+func (s *Store) Order() []string {
+	if s == nil || s.root == nil {
+		return nil
+	}
+	names := make([]string, 0, len(s.root.Content)/2)
+	for i := 0; i+1 < len(s.root.Content); i += 2 {
+		names = append(names, s.root.Content[i].Value)
+	}
+	return names
+}
+
 // Lookup 返回服务记录中的镜像。
 func (s *Store) Lookup(service string) (string, bool) {
 	key, value := s.find(service)

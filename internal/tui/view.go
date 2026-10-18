@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -73,8 +74,36 @@ func newDelegate() list.DefaultDelegate {
 }
 
 func buildItems(services []docker.Service, st *store.Store) []serviceItem {
-	items := make([]serviceItem, 0, len(services))
+	byName := make(map[string]docker.Service, len(services))
 	for _, svc := range services {
+		byName[svc.Name] = svc
+	}
+
+	// 记录文件存在时，优先按文件中的定义顺序排列，其余服务再按名称排序。
+	ordered := make([]docker.Service, 0, len(services))
+	seen := make(map[string]bool, len(services))
+	if st != nil {
+		for _, name := range st.Order() {
+			svc, ok := byName[name]
+			if !ok || seen[name] {
+				continue
+			}
+			seen[name] = true
+			ordered = append(ordered, svc)
+		}
+	}
+
+	rest := make([]docker.Service, 0, len(services)-len(ordered))
+	for _, svc := range services {
+		if !seen[svc.Name] {
+			rest = append(rest, svc)
+		}
+	}
+	sort.Slice(rest, func(i, j int) bool { return rest[i].Name < rest[j].Name })
+	ordered = append(ordered, rest...)
+
+	items := make([]serviceItem, 0, len(ordered))
+	for _, svc := range ordered {
 		it := serviceItem{svc: svc, status: statusMissing}
 		if st != nil {
 			if rec, ok := st.Lookup(svc.Name); ok {

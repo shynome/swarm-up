@@ -160,3 +160,32 @@ func TestLoadRejectsNonMappingRoot(t *testing.T) {
 		t.Fatal("根节点是列表时应该报错")
 	}
 }
+
+func TestOrder(t *testing.T) {
+	path := writeFile(t, "web_admin:\n  image: a\nweb_api:\n  image: b\nweb_cron:\n  image: c\n", 0o644)
+	st, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 报错: %v", err)
+	}
+
+	got := st.Order()
+	want := []string{"web_admin", "web_api", "web_cron"}
+	if len(got) != len(want) {
+		t.Fatalf("Order() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Order() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOrderMissingFile(t *testing.T) {
+	st, err := Load(filepath.Join(t.TempDir(), "none.yaml"))
+	if err != nil {
+		t.Fatalf("Load 报错: %v", err)
+	}
+	if got := st.Order(); len(got) != 0 {
+		t.Fatalf("不存在文件时 Order() = %v, want empty", got)
+	}
+}
