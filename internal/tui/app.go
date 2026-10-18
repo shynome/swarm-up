@@ -32,6 +32,8 @@ const (
 	stateEdit
 	stateConfirm
 	stateRunning
+	stateUpdateConfirm
+	stateWriteConfirm
 	stateResult
 )
 
@@ -41,7 +43,6 @@ const (
 	stagePull flowStage = iota
 	stageUpdate
 	stageWrite
-	stageDone
 )
 
 func (s flowStage) label() string {
@@ -72,11 +73,12 @@ type Model struct {
 	newTag   string
 	inputErr string
 
-	logs      []string
-	stage     flowStage
-	flowCh    chan flowEvent
-	cancel    context.CancelFunc
-	resultErr error
+	pendingImage string
+	logs         []string
+	stage        flowStage
+	flowCh       chan flowEvent
+	cancel       context.CancelFunc
+	resultErr    error
 
 	toast    string
 	toastErr bool
@@ -120,12 +122,15 @@ type servicesMsg struct {
 }
 
 type flowEvent struct {
-	stage   flowStage
-	line    string
-	service string
-	image   string
-	warn    string
-	err     error
+	stage flowStage
+	line  string
+	done  bool
+	image string
+	err   error
+}
+
+type writeDoneMsg struct {
+	err error
 }
 
 type flowClosedMsg struct{}
@@ -156,6 +161,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.onServices(msg)
 	case flowEvent:
 		return m, m.onFlowEvent(msg)
+	case writeDoneMsg:
+		return m, m.onWriteDone(msg)
 	case flowClosedMsg:
 		return m, nil
 	case spinner.TickMsg:
@@ -226,6 +233,10 @@ func (m *Model) onKey(key tea.KeyMsg) tea.Cmd {
 		return m.confirmKey(key)
 	case stateRunning:
 		return m.runningKey(key)
+	case stateUpdateConfirm:
+		return m.updateConfirmKey(key)
+	case stateWriteConfirm:
+		return m.writeConfirmKey(key)
 	case stateResult:
 		return m.resultKey(key)
 	}
@@ -311,11 +322,48 @@ func (m *Model) confirmKey(key tea.KeyMsg) tea.Cmd {
 	case "ctrl+c":
 		return tea.Quit
 	case "enter":
+		if m.cfg.DryRun {
+			m.toast = "dry-run：未执行任何命令"
+			m.toastErr = false
+			m.state = stateList
+			return nil
+		}
 		m.logs = nil
 		m.resultErr = nil
-		m.stage = stagePull
-		m.state = stateRunning
-		return tea.Batch(m.startFlow(), m.spin.Tick)
+		m.pendingImage = ""
+		return tea.Batch(m.startPull(), m.spin.Tick)
+	}
+	return nil
+}
+
+// updateConfirmKey 在 pull 完成后确认真实带 digest 的 update 命令。
+func (m *Model) updateConfirmKey(key tea.KeyMsg) tea.Cmd {
+	switch key.String() {
+	case "esc":
+		m.state = stateList
+		m.toast = "已取消：镜像已 pull，但未更新 service"
+		m.toastErr = true
+		return nil
+	case "ctrl+c":
+		return tea.Quit
+	case "enter":
+		return tea.Batch(m.startUpdate(), m.spin.Tick)
+	}
+	return nil
+}
+
+// writeConfirmKey 在 service 更新成功后确认写入记录文件。
+func (m *Model) writeConfirmKey(key tea.KeyMsg) tea.Cmd {
+	switch key.String() {
+	case "esc":
+		m.state = stateList
+		m.toast = "服务已更新，但未写入记录文件"
+		m.toastErr = true
+		return m.loadServices()
+	case "ctrl+c":
+		return tea.Quit
+	case "enter":
+		return m.writeYAML()
 	}
 	return nil
 }
@@ -359,7 +407,7 @@ func (m *Model) onFlowEvent(ev flowEvent) tea.Cmd {
 	if ev.line != "" {
 		m.appendLog(ev.line)
 	}
-	if ev.stage != stageDone {
+	if !ev.done {
 		m.stage = ev.stage
 		return waitFlow(m.flowCh)
 	}
@@ -371,18 +419,38 @@ func (m *Model) onFlowEvent(ev flowEvent) tea.Cmd {
 		return nil
 	}
 
-	// 成功：回到列表并刷新
+	switch ev.stage {
+	case stagePull:
+		// pull 完成，先让用户确认实际带 digest 的 update 命令
+		m.pendingImage = ev.image
+		m.stage = stageUpdate
+		m.state = stateUpdateConfirm
+		return nil
+	case stageUpdate:
+		if m.cfg.Store == nil {
+			m.state = stateList
+			m.toastErr = true
+			m.toast = "✓ 已更新 " + m.selected.Name + " → " + shortImage(ev.image) + "（未指定记录文件，未写入 yaml）"
+			return m.loadServices()
+		}
+		// service 已更新，再让用户确认写入 yaml
+		m.stage = stageWrite
+		m.state = stateWriteConfirm
+		return nil
+	}
+	return nil
+}
+
+func (m *Model) onWriteDone(msg writeDoneMsg) tea.Cmd {
+	if msg.err != nil {
+		m.resultErr = msg.err
+		m.state = stateResult
+		return nil
+	}
+
 	m.state = stateList
 	m.toastErr = false
-	msg := "✓ 已更新 " + ev.service
-	if ev.image != "" {
-		msg += " → " + shortImage(ev.image)
-	}
-	if ev.warn != "" {
-		msg += "（" + ev.warn + "）"
-		m.toastErr = false
-	}
-	m.toast = msg
+	m.toast = "✓ 已更新 " + m.selected.Name + " → " + shortImage(m.pendingImage) + "，已写入 " + m.cfg.Store.Path()
 	return m.loadServices()
 }
 
@@ -393,21 +461,18 @@ func (m *Model) appendLog(line string) {
 	}
 }
 
-// startFlow 在后台执行 pull → service update → 写 yaml，并通过事件通道汇报进度。
-func (m *Model) startFlow() tea.Cmd {
+// startPull 在后台拉取镜像并把输出流式送进界面。
+func (m *Model) startPull() tea.Cmd {
 	ch := make(chan flowEvent, 512)
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.flowCh = ch
+	m.stage = stagePull
+	m.state = stateRunning
 
 	svc := *m.selected
-	tag := m.newTag
+	next := svc.Ref.WithTag(m.newTag)
 	client := m.cfg.Client
-	st := m.cfg.Store
-	dryRun := m.cfg.DryRun
-
-	next := svc.Ref.WithTag(tag)
-	pending := next.RepoTag() + "@sha256:<pull 后解析>"
 
 	go func() {
 		defer close(ch)
@@ -419,61 +484,67 @@ func (m *Model) startFlow() tea.Cmd {
 			default: // UI 已退出时丢弃，避免阻塞
 			}
 		}
-		onLine := func(stage flowStage) func(string) {
-			return func(line string) {
-				send(flowEvent{stage: stage, line: line})
-			}
-		}
-		fail := func(err error) {
-			send(flowEvent{stage: stageDone, service: svc.Name, err: err})
-		}
 
-		// 1. pull
 		send(flowEvent{stage: stagePull, line: "$ " + client.Bin() + " pull " + next.RepoTag()})
-
-		if dryRun {
-			send(flowEvent{stage: stagePull, line: "（dry-run：不执行 pull，无法解析 digest）"})
-			send(flowEvent{stage: stageUpdate, line: "$ " + client.Bin() + " " + strings.Join(docker.UpdateArgs(svc.Name, pending), " ")})
-			if st == nil {
-				send(flowEvent{stage: stageWrite, line: "⚠ 未指定记录文件，跳过 yaml 记录"})
-			} else {
-				send(flowEvent{stage: stageWrite, line: "$ " + st.Path() + ": " + svc.Name + ".image = " + pending})
-			}
-			send(flowEvent{stage: stageDone, service: svc.Name, warn: "dry-run：未执行任何命令"})
-			return
-		}
-
-		digest, err := client.Pull(ctx, next, onLine(stagePull))
+		digest, err := client.Pull(ctx, next, func(line string) {
+			send(flowEvent{stage: stagePull, line: line})
+		})
 		if err != nil {
-			fail(err)
+			send(flowEvent{stage: stagePull, done: true, err: err})
 			return
 		}
-		image := next.RepoTag() + "@" + digest
-
-		// 2. service update
-		send(flowEvent{stage: stageUpdate, line: "$ " + client.Bin() + " " + strings.Join(docker.UpdateArgs(svc.Name, image), " ")})
-		if err := client.UpdateService(ctx, svc.Name, image, onLine(stageUpdate)); err != nil {
-			fail(err)
-			return
-		}
-
-		// 3. yaml
-		warn := ""
-		if st == nil {
-			warn = "未指定记录文件，镜像未记录"
-			send(flowEvent{stage: stageWrite, line: "⚠ " + warn})
-		} else {
-			send(flowEvent{stage: stageWrite, line: "$ " + st.Path() + ": " + svc.Name + ".image = " + image})
-			if err := st.SetImage(svc.Name, image); err != nil {
-				fail(err)
-				return
-			}
-		}
-
-		send(flowEvent{stage: stageDone, service: svc.Name, image: image, warn: warn})
+		send(flowEvent{stage: stagePull, done: true, image: next.RepoTag() + "@" + digest})
 	}()
 
 	return waitFlow(ch)
+}
+
+// startUpdate 在用户确认后执行 service update。
+func (m *Model) startUpdate() tea.Cmd {
+	ch := make(chan flowEvent, 512)
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.flowCh = ch
+	m.stage = stageUpdate
+	m.state = stateRunning
+
+	svc := *m.selected
+	image := m.pendingImage
+	client := m.cfg.Client
+
+	go func() {
+		defer close(ch)
+		defer cancel()
+
+		send := func(ev flowEvent) {
+			select {
+			case ch <- ev:
+			default:
+			}
+		}
+
+		send(flowEvent{stage: stageUpdate, line: "$ " + client.Bin() + " " + strings.Join(docker.UpdateArgs(svc.Name, image), " ")})
+		err := client.UpdateService(ctx, svc.Name, image, func(line string) {
+			send(flowEvent{stage: stageUpdate, line: line})
+		})
+		send(flowEvent{stage: stageUpdate, done: true, err: err})
+	}()
+
+	return waitFlow(ch)
+}
+
+// writeYAML 在用户确认后写入记录文件。
+func (m *Model) writeYAML() tea.Cmd {
+	st := m.cfg.Store
+	svc := *m.selected
+	image := m.pendingImage
+
+	return func() tea.Msg {
+		if err := st.SetImage(svc.Name, image); err != nil {
+			return writeDoneMsg{err: err}
+		}
+		return writeDoneMsg{}
+	}
 }
 
 func waitFlow(ch <-chan flowEvent) tea.Cmd {

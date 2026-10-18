@@ -102,6 +102,10 @@ func (m *Model) View() string {
 		return m.viewConfirm()
 	case stateRunning:
 		return m.viewRunning()
+	case stateUpdateConfirm:
+		return m.viewUpdateConfirm()
+	case stateWriteConfirm:
+		return m.viewWriteConfirm()
 	case stateResult:
 		return m.viewResult()
 	default:
@@ -150,23 +154,43 @@ func (m *Model) viewConfirm() string {
 		return m.viewList()
 	}
 
-	pullLine, updateLine, writeLine := m.plan()
+	next := svc.Ref.WithTag(m.newTag)
+	pending := next.RepoTag() + "@sha256:<pull 后解析>"
 	rows := []string{
 		label("服务") + svc.Name,
 		label("当前") + shortImage(svc.Image),
-		label("目标") + svc.Ref.WithTag(m.newTag).RepoTag() + "@sha256:<pull 后解析>",
+		label("目标") + next.RepoTag(),
 		"",
-		styleSub.Render("将执行"),
-		"  1. " + pullLine,
-		"  2. " + updateLine,
+		styleSub.Render("步骤 1/3 · 拉取镜像"),
+		"  " + m.cfg.Client.Bin() + " pull " + next.RepoTag(),
 	}
-	if writeLine == "" {
-		rows = append(rows, "  3. "+styleWarn.Render("⚠ 未指定记录文件，跳过 yaml 记录"))
-	} else {
-		rows = append(rows, "  3. "+writeLine)
-	}
+
 	if m.cfg.DryRun {
+		rows = append(rows,
+			"",
+			styleSub.Render("步骤 2/3 · 更新 service（不执行）"),
+			"  "+m.cfg.Client.Bin()+" "+strings.Join(docker.UpdateArgs(svc.Name, pending), " "),
+		)
+		if m.cfg.Store != nil {
+			rows = append(rows,
+				"",
+				styleSub.Render("步骤 3/3 · 写入记录文件（不执行）"),
+				"  "+m.cfg.Store.Path()+": "+svc.Name+".image = "+pending,
+			)
+		} else {
+			rows = append(rows, "", styleWarn.Render("未指定记录文件，不会写入 yaml"))
+		}
 		rows = append(rows, "", styleWarn.Render("dry-run：只展示命令，不执行"))
+	} else {
+		rows = append(rows, "", styleDim.Render("pull 完成后会再次确认 update 命令"))
+		if m.cfg.Store == nil {
+			rows = append(rows, styleWarn.Render("未指定记录文件，更新结果不会写入 yaml"))
+		}
+	}
+
+	keys := []string{"enter 开始 pull", "esc 返回"}
+	if m.cfg.DryRun {
+		keys = []string{"enter 结束", "esc 返回"}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -174,7 +198,61 @@ func (m *Model) viewConfirm() string {
 		"",
 		m.boxRows(rows),
 		"",
-		m.footer("enter 执行", "esc 返回"),
+		m.footer(keys...),
+	)
+}
+
+// viewUpdateConfirm 展示 pull 后得到的完整镜像和将要执行的 update 命令。
+func (m *Model) viewUpdateConfirm() string {
+	svc := m.selected
+	if svc == nil || m.pendingImage == "" {
+		return m.viewList()
+	}
+
+	cmdline := m.cfg.Client.Bin() + " " + strings.Join(docker.UpdateArgs(svc.Name, m.pendingImage), " ")
+	rows := []string{
+		label("服务") + svc.Name,
+		label("当前") + shortImage(svc.Image),
+		label("新镜像") + shortImage(m.pendingImage),
+		label("完整") + m.pendingImage,
+		"",
+		styleSub.Render("步骤 2/3 · 确认更新命令"),
+		"  " + cmdline,
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.header(),
+		"",
+		m.boxRows(rows),
+		"",
+		m.footer("enter 执行", "esc 取消"),
+	)
+}
+
+// viewWriteConfirm 在 service 更新成功后确认写入记录文件。
+func (m *Model) viewWriteConfirm() string {
+	svc := m.selected
+	if svc == nil || m.cfg.Store == nil {
+		return m.viewList()
+	}
+
+	rows := []string{
+		label("服务") + svc.Name,
+		label("新镜像") + shortImage(m.pendingImage),
+		"",
+		styleSub.Render("步骤 3/3 · 确认写入记录文件"),
+		"  " + m.cfg.Store.Path(),
+		"  " + svc.Name + ".image = " + m.pendingImage,
+		"",
+		styleDim.Render("esc 跳过写入（本次更新不会被记录）"),
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		m.header(),
+		"",
+		m.boxRows(rows),
+		"",
+		m.footer("enter 写入", "esc 跳过"),
 	)
 }
 
@@ -200,25 +278,12 @@ func (m *Model) viewResult() string {
 	rows := []string{m.header(), "", title}
 	if m.resultErr != nil {
 		for _, line := range strings.Split(m.resultErr.Error(), "\n") {
-			rows = append(rows, wrapText(line, m.w)...)
+			rows = append(rows, wrapText(line, m.lineWidth())...)
 		}
 	}
 	rows = append(rows, "", m.visibleLogs(maxInt(3, m.h-9)), "")
 	rows = append(rows, m.footer("enter 返回列表", "q 退出"))
 	return lipgloss.JoinVertical(lipgloss.Left, rows...)
-}
-
-func (m *Model) plan() (pullLine, updateLine, writeLine string) {
-	svc := m.selected
-	next := svc.Ref.WithTag(m.newTag)
-	pending := next.RepoTag() + "@sha256:<pull 后解析>"
-
-	pullLine = m.cfg.Client.Bin() + " pull " + next.RepoTag()
-	updateLine = m.cfg.Client.Bin() + " " + strings.Join(docker.UpdateArgs(svc.Name, pending), " ")
-	if m.cfg.Store != nil {
-		writeLine = "写入 " + m.cfg.Store.Path() + ": " + svc.Name + ".image = " + pending
-	}
-	return pullLine, updateLine, writeLine
 }
 
 func (m *Model) header() string {
@@ -242,7 +307,7 @@ func (m *Model) header() string {
 			parts = append(parts, styleWarn.Render("文件不存在，成功后自动创建"))
 		}
 	}
-	return truncate(strings.Join(parts, "  "), m.w)
+	return truncate(strings.Join(parts, "  "), m.lineWidth())
 }
 
 func (m *Model) counts() (ok, mismatch, missing int) {
@@ -262,14 +327,23 @@ func (m *Model) counts() (ok, mismatch, missing int) {
 func (m *Model) footer(keys ...string) string {
 	help := styleHelp.Render(strings.Join(keys, "  "))
 	if m.toast == "" {
-		return truncate(help, m.w)
+		return truncate(help, m.lineWidth())
 	}
 
 	style := styleOK
 	if m.toastErr {
 		style = styleErr
 	}
-	return truncate(help, m.w) + "\n" + truncate(style.Render(m.toast), m.w)
+	return truncate(help, m.lineWidth()) + "\n" + truncate(style.Render(m.toast), m.lineWidth())
+}
+
+// lineWidth 预留一列，避免写满整行时终端自动换行。
+func (m *Model) lineWidth() int {
+	w := m.w - 1
+	if w < 10 {
+		w = 10
+	}
+	return w
 }
 
 func (m *Model) visibleLogs(n int) string {
