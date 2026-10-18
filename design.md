@@ -169,3 +169,10 @@ swarm-up/
 4. yaml 中其他条目、注释、键顺序保持不变。
 5. pull 失败或 update 失败时，yaml 不被修改，界面显示错误与失败命令。
 6. `go test ./...` 覆盖镜像引用解析、yaml 精确修改、一致性判定。
+
+## 9. 发布
+
+- 推送 `v*` 形式的 tag 触发 `.github/workflows/release.yml`。
+- 构建 linux/amd64 与 linux/arm64 静态二进制（`CGO_ENABLED=0`）。
+- 产物：`swarm-up_<tag>_linux_<arch>.tar.gz` 与 `checksums.txt`，自动创建 GitHub Release。
+- 本地可用 `make dist` 生成相同的包（输出到 `dist/`）。
