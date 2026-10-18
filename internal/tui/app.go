@@ -18,10 +18,11 @@ const maxLogLines = 400
 
 // Config 是 TUI 的启动参数。
 type Config struct {
-	File   string
-	DryRun bool
-	Client *docker.Client
-	Store  *store.Store
+	File    string
+	DryRun  bool
+	Version string
+	Client  *docker.Client
+	Store   *store.Store
 }
 
 type state int

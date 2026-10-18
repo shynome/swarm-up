@@ -222,6 +222,9 @@ func (m *Model) plan() (pullLine, updateLine, writeLine string) {
 
 func (m *Model) header() string {
 	parts := []string{styleTitle.Render("swarm-up")}
+	if m.cfg.Version != "" {
+		parts = append(parts, styleDim.Render(m.cfg.Version))
+	}
 	if m.cfg.DryRun {
 		parts = append(parts, styleWarn.Render("dry-run"))
 	}

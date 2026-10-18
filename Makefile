@@ -1,9 +1,11 @@
 BIN := swarm-up
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test fmt vet install clean
+.PHONY: build test fmt vet install version clean
 
 build:
-	go build -o $(BIN) .
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) .
 
 test:
 	go test ./...
@@ -15,7 +17,10 @@ vet:
 	go vet ./...
 
 install:
-	go install .
+	go install -trimpath -ldflags "$(LDFLAGS)" .
+
+version:
+	@echo $(VERSION)
 
 clean:
 	rm -f $(BIN)
