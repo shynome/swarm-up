@@ -25,6 +25,17 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
 			Padding(0, 2)
+
+	styleButton = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Background(lipgloss.Color("238")).
+			Padding(0, 2)
+
+	styleButtonActive = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("232")).
+				Background(lipgloss.Color("39")).
+				Bold(true).
+				Padding(0, 2)
 )
 
 type syncStatus int
@@ -217,9 +228,10 @@ func (m *Model) viewConfirm() string {
 		}
 	}
 
-	keys := []string{"enter 开始 pull", "esc 返回"}
+	labels := []string{"开始 pull", "取消"}
+	hint := "←/→ 选择，enter 确认，esc 返回"
 	if m.cfg.DryRun {
-		keys = []string{"enter 结束", "esc 返回"}
+		labels = []string{"结束", "返回"}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -227,7 +239,9 @@ func (m *Model) viewConfirm() string {
 		"",
 		m.boxRows(rows),
 		"",
-		m.footer(keys...),
+		m.actions(labels...),
+		"",
+		truncate(styleHelp.Render(hint), m.lineWidth()),
 	)
 }
 
@@ -254,7 +268,9 @@ func (m *Model) viewUpdateConfirm() string {
 		"",
 		m.boxRows(rows),
 		"",
-		m.footer("enter 执行", "esc 取消"),
+		m.actions("执行", "取消"),
+		"",
+		truncate(styleHelp.Render("←/→ 选择，enter 确认，esc 取消"), m.lineWidth()),
 	)
 }
 
@@ -281,8 +297,23 @@ func (m *Model) viewWriteConfirm() string {
 		"",
 		m.boxRows(rows),
 		"",
-		m.footer("enter 写入", "esc 跳过"),
+		m.actions("写入", "跳过"),
+		"",
+		truncate(styleHelp.Render("←/→ 选择，enter 确认，esc 跳过"), m.lineWidth()),
 	)
+}
+
+// actions 渲染可获焦点的按钮行。
+func (m *Model) actions(labels ...string) string {
+	btns := make([]string, len(labels))
+	for i, label := range labels {
+		style := styleButton
+		if i == m.confirmFocus {
+			style = styleButtonActive
+		}
+		btns[i] = style.Render(label)
+	}
+	return strings.Join(btns, " ")
 }
 
 func (m *Model) viewRunning() string {

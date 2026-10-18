@@ -73,6 +73,7 @@ type Model struct {
 	newTag   string
 	inputErr string
 
+	confirmFocus int
 	pendingImage string
 	logs         []string
 	stage        flowStage
@@ -303,6 +304,7 @@ func (m *Model) editKey(key tea.KeyMsg) tea.Cmd {
 		m.newTag = tag
 		m.inputErr = ""
 		m.input.Blur()
+		m.confirmFocus = 0
 		m.state = stateConfirm
 		return nil
 	}
@@ -321,7 +323,15 @@ func (m *Model) confirmKey(key tea.KeyMsg) tea.Cmd {
 		return textinput.Blink
 	case "ctrl+c":
 		return tea.Quit
+	case "left", "right", "tab", "shift+tab":
+		m.toggleFocus()
+		return nil
 	case "enter":
+		if m.confirmFocus == 1 {
+			m.state = stateEdit
+			m.input.Focus()
+			return textinput.Blink
+		}
 		if m.cfg.DryRun {
 			m.toast = "dry-run：未执行任何命令"
 			m.toastErr = false
@@ -340,15 +350,25 @@ func (m *Model) confirmKey(key tea.KeyMsg) tea.Cmd {
 func (m *Model) updateConfirmKey(key tea.KeyMsg) tea.Cmd {
 	switch key.String() {
 	case "esc":
-		m.state = stateList
-		m.toast = "已取消：镜像已 pull，但未更新 service"
-		m.toastErr = true
-		return nil
+		return m.cancelUpdate()
 	case "ctrl+c":
 		return tea.Quit
+	case "left", "right", "tab", "shift+tab":
+		m.toggleFocus()
+		return nil
 	case "enter":
+		if m.confirmFocus == 1 {
+			return m.cancelUpdate()
+		}
 		return tea.Batch(m.startUpdate(), m.spin.Tick)
 	}
+	return nil
+}
+
+func (m *Model) cancelUpdate() tea.Cmd {
+	m.state = stateList
+	m.toast = "已取消：镜像已 pull，但未更新 service"
+	m.toastErr = true
 	return nil
 }
 
@@ -356,16 +376,30 @@ func (m *Model) updateConfirmKey(key tea.KeyMsg) tea.Cmd {
 func (m *Model) writeConfirmKey(key tea.KeyMsg) tea.Cmd {
 	switch key.String() {
 	case "esc":
-		m.state = stateList
-		m.toast = "服务已更新，但未写入记录文件"
-		m.toastErr = true
-		return m.loadServices()
+		return m.skipWrite()
 	case "ctrl+c":
 		return tea.Quit
+	case "left", "right", "tab", "shift+tab":
+		m.toggleFocus()
+		return nil
 	case "enter":
+		if m.confirmFocus == 1 {
+			return m.skipWrite()
+		}
 		return m.writeYAML()
 	}
 	return nil
+}
+
+func (m *Model) skipWrite() tea.Cmd {
+	m.state = stateList
+	m.toast = "服务已更新，但未写入记录文件"
+	m.toastErr = true
+	return m.loadServices()
+}
+
+func (m *Model) toggleFocus() {
+	m.confirmFocus = (m.confirmFocus + 1) % 2
 }
 
 func (m *Model) runningKey(key tea.KeyMsg) tea.Cmd {
@@ -424,6 +458,7 @@ func (m *Model) onFlowEvent(ev flowEvent) tea.Cmd {
 		// pull 完成，先让用户确认实际带 digest 的 update 命令
 		m.pendingImage = ev.image
 		m.stage = stageUpdate
+		m.confirmFocus = 0
 		m.state = stateUpdateConfirm
 		return nil
 	case stageUpdate:
@@ -435,6 +470,7 @@ func (m *Model) onFlowEvent(ev flowEvent) tea.Cmd {
 		}
 		// service 已更新，再让用户确认写入 yaml
 		m.stage = stageWrite
+		m.confirmFocus = 0
 		m.state = stateWriteConfirm
 		return nil
 	}
