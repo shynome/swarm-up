@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -67,32 +69,133 @@ func (s *Store) Path() string { return s.path }
 // Exists 表示文件在加载时是否已存在。
 func (s *Store) Exists() bool { return s.exists }
 
-// Order 返回文件中服务条目的定义顺序。
-func (s *Store) Order() []string {
+// Entry 是 compose 文件中与某个 service 对应的记录。
+type Entry struct {
+	Key   string // services 下的服务名
+	Image string
+}
+
+type entry struct {
+	key  string
+	node *yaml.Node
+}
+
+// servicesNode 返回 compose 文件中的 services 映射。
+func (s *Store) servicesNode() *yaml.Node {
 	if s == nil || s.root == nil {
 		return nil
 	}
-	names := make([]string, 0, len(s.root.Content)/2)
-	for i := 0; i+1 < len(s.root.Content); i += 2 {
-		names = append(names, s.root.Content[i].Value)
+	v := mappingValue(s.root, "services")
+	if v == nil || v.Kind != yaml.MappingNode {
+		return nil
+	}
+	return v
+}
+
+func (s *Store) entries() []entry {
+	services := s.servicesNode()
+	if services == nil {
+		return nil
+	}
+	list := make([]entry, 0, len(services.Content)/2)
+	for i := 0; i+1 < len(services.Content); i += 2 {
+		list = append(list, entry{key: services.Content[i].Value, node: services.Content[i+1]})
+	}
+	return list
+}
+
+func (e entry) image() string {
+	if e.node == nil || e.node.Kind != yaml.MappingNode {
+		return ""
+	}
+	if img := mappingValue(e.node, "image"); img != nil && img.Kind == yaml.ScalarNode {
+		return img.Value
+	}
+	return ""
+}
+
+// matchEntry 找到与 service 对应的条目。
+//
+// 匹配顺序：同名 → 唯一后缀（vtb_songs → songs）→ 镜像仓库。
+func (s *Store) matchEntry(service, image string) (entry, bool) {
+	list := s.entries()
+	if len(list) == 0 || service == "" {
+		return entry{}, false
+	}
+
+	for _, e := range list {
+		if e.key == service {
+			return e, true
+		}
+	}
+
+	// 取最长的后缀 key，避免 api_songs / songs 这类歧义
+	best := -1
+	for i, e := range list {
+		if !strings.HasSuffix(service, "_"+e.key) {
+			continue
+		}
+		if best == -1 || len(e.key) > len(list[best].key) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		return list[best], true
+	}
+
+	repo := repoOf(image)
+	if repo == "" {
+		return entry{}, false
+	}
+	hit := -1
+	for i, e := range list {
+		if repoOf(e.image()) != repo {
+			continue
+		}
+		if hit >= 0 {
+			return entry{}, false // 多个候选，无法确定
+		}
+		hit = i
+	}
+	if hit >= 0 {
+		return list[hit], true
+	}
+	return entry{}, false
+}
+
+// Match 返回与服务对应的记录。
+func (s *Store) Match(service, image string) (Entry, bool) {
+	e, ok := s.matchEntry(service, image)
+	if !ok {
+		return Entry{}, false
+	}
+	return Entry{Key: e.key, Image: e.image()}, true
+}
+
+// Order 返回 compose 中 services 条目的定义顺序。
+func (s *Store) Order() []string {
+	list := s.entries()
+	names := make([]string, 0, len(list))
+	for _, e := range list {
+		names = append(names, e.key)
 	}
 	return names
 }
 
 // Lookup 返回服务记录中的镜像。
-func (s *Store) Lookup(service string) (string, bool) {
-	key, value := s.find(service)
-	if key == nil || value == nil {
+func (s *Store) Lookup(service, image string) (string, bool) {
+	e, ok := s.matchEntry(service, image)
+	if !ok {
 		return "", false
 	}
-	img := mappingValue(value, "image")
-	if img == nil || img.Kind != yaml.ScalarNode {
-		return "", false
-	}
-	return img.Value, true
+	img := e.image()
+	return img, img != ""
 }
 
-// SetImage 设置服务的 image 字段（不存在则追加条目），并立即写盘。
+// SetImage 设置 compose 中服务的 image 字段并立即写盘。
+//
+// 文件不存在或 services 为空时会在 services 下新增条目；
+// 已有服务条目但匹配不到时返回错误，避免写错位置。
 func (s *Store) SetImage(service, image string) error {
 	if s == nil {
 		return errors.New("记录文件为空")
@@ -101,36 +204,169 @@ func (s *Store) SetImage(service, image string) error {
 		return errors.New("服务名为空")
 	}
 
-	key, value := s.find(service)
-	switch {
-	case key == nil:
-		s.root.Content = append(s.root.Content,
-			scalar(service),
-			&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+	e, ok := s.matchEntry(service, image)
+	if ok {
+		if e.node.Kind != yaml.MappingNode {
+			// 兼容 `service:`（null）或 `service: 旧值` 的写法。
+			*e.node = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
 				scalar("image"),
 				scalar(image),
-			}},
-		)
-	case value.Kind != yaml.MappingNode:
-		// 兼容 `service:`（null）或 `service: 旧值` 的写法。
-		*value = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
-			scalar("image"),
-			scalar(image),
-		}}
-	default:
-		if img := mappingValue(value, "image"); img != nil {
+			}}
+		} else if img := mappingValue(e.node, "image"); img != nil {
+			// 优先只替换该行文本，保留空行、注释与其他格式。
+			patched := s.patchImageScalar(img, image)
 			img.Kind = yaml.ScalarNode
 			img.Tag = "!!str"
 			img.Value = image
+			if patched {
+				return s.writePatched()
+			}
 		} else {
-			value.Content = append(value.Content, scalar("image"), scalar(image))
+			e.node.Content = append(e.node.Content, scalar("image"), scalar(image))
 		}
+		return s.Save()
 	}
 
+	services := s.servicesNode()
+	if services == nil {
+		if len(s.root.Content) > 0 {
+			return fmt.Errorf("%s 不是 docker-compose 文件（缺少 services）", s.path)
+		}
+		// 新文件：创建 services 映射
+		services = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		s.root.Content = append(s.root.Content, scalar("services"), services)
+	} else if len(services.Content) > 0 {
+		return fmt.Errorf("compose 中找不到与服务 %s（镜像 %s）匹配的条目", service, image)
+	}
+
+	services.Content = append(services.Content,
+		scalar(service),
+		&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+			scalar("image"),
+			scalar(image),
+		}},
+	)
 	return s.Save()
 }
 
-// Save 原子写入文件，保留原文件权限。
+func repoOf(image string) string {
+	s := strings.TrimSpace(image)
+	if s == "" {
+		return ""
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, ":"); i > strings.LastIndex(s, "/") {
+		s = s[:i]
+	}
+	return s
+}
+
+var imageLinePattern = regexp.MustCompile(`^(\s*image:\s*)(.*)$`)
+
+// patchImageScalar 只替换 image 值所在行的值，保留空行、注释与其余格式。
+// 无法安全定位（多行标量、flow 风格等）时返回 false，由调用方回退到整体重新序列化。
+func (s *Store) patchImageScalar(node *yaml.Node, newValue string) bool {
+	if s.source == nil || node.Line <= 0 {
+		return false
+	}
+	if node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
+		return false
+	}
+
+	lines := bytes.Split(s.source, []byte("\n"))
+	idx := node.Line - 1
+	if idx < 0 || idx >= len(lines) {
+		return false
+	}
+	m := imageLinePattern.FindSubmatch(lines[idx])
+	if m == nil {
+		return false
+	}
+
+	suffix, ok := imageValueSuffix(string(m[2]), node)
+	if !ok {
+		return false
+	}
+
+	value := newValue
+	switch {
+	case node.Style&yaml.DoubleQuotedStyle != 0:
+		value = `"` + strings.ReplaceAll(newValue, `"`, `\"`) + `"`
+	case node.Style&yaml.SingleQuotedStyle != 0:
+		value = "'" + strings.ReplaceAll(newValue, "'", "''") + "'"
+	}
+
+	line := make([]byte, 0, len(m[1])+len(value)+len(suffix))
+	line = append(line, m[1]...)
+	line = append(line, value...)
+	line = append(line, suffix...)
+
+	newLines := make([][]byte, len(lines))
+	copy(newLines, lines)
+	newLines[idx] = line
+	s.source = bytes.Join(newLines, []byte("\n"))
+	return true
+}
+
+// imageValueSuffix 返回 image 值之后的内容（如行内注释），并校验解析结果与 node.Value 一致。
+func imageValueSuffix(rest string, node *yaml.Node) (string, bool) {
+	switch {
+	case node.Style&yaml.DoubleQuotedStyle != 0:
+		if !strings.HasPrefix(rest, `"`) {
+			return "", false
+		}
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '\\' {
+				i++
+				continue
+			}
+			if rest[i] == '"' {
+				if rest[1:i] != node.Value {
+					return "", false
+				}
+				return rest[i+1:], true
+			}
+		}
+		return "", false
+	case node.Style&yaml.SingleQuotedStyle != 0:
+		if !strings.HasPrefix(rest, "'") {
+			return "", false
+		}
+		for i := 1; i < len(rest); i++ {
+			if rest[i] != '\'' {
+				continue
+			}
+			if i+1 < len(rest) && rest[i+1] == '\'' {
+				i++
+				continue
+			}
+			if strings.ReplaceAll(rest[1:i], "''", "'") != node.Value {
+				return "", false
+			}
+			return rest[i+1:], true
+		}
+		return "", false
+	default:
+		value := rest
+		suffix := ""
+		if i := strings.Index(rest, " #"); i >= 0 {
+			value = rest[:i]
+			suffix = rest[i:]
+		}
+		if strings.HasSuffix(value, "\r") {
+			value = strings.TrimSuffix(value, "\r")
+			suffix = "\r" + suffix
+		}
+		if strings.TrimSpace(value) != node.Value {
+			return "", false
+		}
+		return suffix, true
+	}
+}
+
+// Save 重新序列化并原子写入文件。
 func (s *Store) Save() error {
 	if s == nil {
 		return errors.New("记录文件为空")
@@ -146,6 +382,24 @@ func (s *Store) Save() error {
 		return err
 	}
 
+	if err := s.writeBytes(buf.Bytes()); err != nil {
+		return err
+	}
+	s.source = append([]byte(nil), buf.Bytes()...)
+	s.exists = true
+	return nil
+}
+
+// writePatched 写入局部修改后的内容（保留原文件其余字节）。
+func (s *Store) writePatched() error {
+	if err := s.writeBytes(s.source); err != nil {
+		return err
+	}
+	s.exists = true
+	return nil
+}
+
+func (s *Store) writeBytes(data []byte) error {
 	dir := filepath.Dir(s.path)
 	mode := os.FileMode(0o644)
 	if fi, err := os.Stat(s.path); err == nil {
@@ -163,7 +417,7 @@ func (s *Store) Save() error {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -177,22 +431,7 @@ func (s *Store) Save() error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("写入 %s 失败: %w", s.path, err)
 	}
-
-	s.source = buf.Bytes()
-	s.exists = true
 	return nil
-}
-
-func (s *Store) find(service string) (key, value *yaml.Node) {
-	if s == nil || s.root == nil {
-		return nil, nil
-	}
-	for i := 0; i+1 < len(s.root.Content); i += 2 {
-		if s.root.Content[i].Value == service {
-			return s.root.Content[i], s.root.Content[i+1]
-		}
-	}
-	return nil, nil
 }
 
 func mappingValue(m *yaml.Node, key string) *yaml.Node {

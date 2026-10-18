@@ -12,7 +12,7 @@ import (
 func TestBuildItemsStatuses(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "images.yaml")
-	content := "web_api:\n  image: acme/api:v1@sha256:aaa\nweb_admin:\n  image: acme/admin:v1@sha256:old\n"
+	content := "services:\n  web_api:\n    image: acme/api:v1@sha256:aaa\n  web_admin:\n    image: acme/admin:v1@sha256:old\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestBuildItemsWithoutStore(t *testing.T) {
 func TestBuildItemsFollowsFileOrder(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "images.yaml")
-	content := "web_cron:\n  image: acme/cron:v1\nweb_api:\n  image: acme/api:v1\nghost:\n  image: acme/ghost:v1\n"
+	content := "services:\n  web_cron:\n    image: acme/cron:v1\n  web_api:\n    image: acme/api:v1\n  ghost:\n    image: acme/ghost:v1\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
 	}

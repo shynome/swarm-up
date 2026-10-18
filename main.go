@@ -55,7 +55,7 @@ func main() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintln(out, "用法: swarm-up [--dry-run] [file]")
 		fmt.Fprintln(out)
-		fmt.Fprintln(out, "  file  yaml 记录文件，格式为: service_name: { image: ... }")
+		fmt.Fprintln(out, "  file  docker-compose.yaml 路径，更新后写入对应的 services.<name>.image")
 		fmt.Fprintln(out)
 		flag.PrintDefaults()
 	}
@@ -78,7 +78,7 @@ func main() {
 		}
 		st = s
 		if !s.Exists() {
-			fmt.Fprintf(os.Stderr, "警告: 记录文件 %s 不存在，更新成功后将自动创建\n", file)
+			fmt.Fprintf(os.Stderr, "警告: compose 文件 %s 不存在，更新成功后将自动创建\n", file)
 		}
 	}
 

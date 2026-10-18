@@ -21,7 +21,7 @@ swarm-up [file]
 swarm-up --dry-run [file]   # 只打印将执行的命令，不实际改动
 ```
 
-- `[file]`：镜像记录文件（yaml）。存在则读取用于校验与回写。
+- `[file]`：docker-compose.yaml 路径。存在则读取用于校验与回写。
 - 无 `file` 参数：TUI 顶部显示警告「未指定记录文件，更新结果不会写入 yaml」，操作仍可执行。
 - `file` 指定但不存在：警告「文件不存在，成功后自动创建」，操作仍可执行。
 
@@ -86,17 +86,29 @@ docker service update --image repo:tag@sha256:digest --quiet <service>
 
 ### 4.4 记录文件读写
 
-格式（服务名 → 镜像）：
+只支持 docker-compose 格式，服务定义在 `services:` 下，只修改对应服务的 `image` 字段：
 
 ```yaml
-web_api:
-  image: ghcr.io/acme/api:v0.0.2@sha256:aa11...
-web_admin:
-  image: ghcr.io/acme/admin:v0.0.2@sha256:bb22...
+version: "3.8"
+services:
+  songs:
+    image: shynome/songs-api:v0.0.12@sha256:...
+    ports:
+      - "8080:8080"
 ```
 
-- 解析使用 `yaml.v3` 的 `yaml.Node`，**只精确修改目标 service 的 `image` 字段**，保留键顺序、注释与其他字段。
-- 目标 service 不存在时新增条目（追加到文件末尾）。
+服务匹配顺序：
+
+1. `services` 下同名 key（`vtb_songs`）
+2. 唯一后缀：`vtb_songs` → `songs`（取最长后缀，避免 `api_songs` / `songs` 歧义）
+3. 镜像仓库唯一匹配（忽略 tag 与 digest）；多个候选则不匹配
+
+写入规则：
+
+- 解析使用 `yaml.v3` 的 `yaml.Node`，**只精确修改 `services.<key>.image`**，保留键顺序、注释与其他字段。
+- 更新已有 `image` 时按行做文本替换，**空行、注释、行内注释与原始缩进保持不变**；只有新增条目或无法安全定位时才整体重新序列化。
+- 文件不存在或 `services` 为空时，在 `services` 下新增条目。
+- 已有服务条目但匹配不到时返回错误，不写入，避免误改。
 - `image` 值一律写入完整 `repo:tag@sha256:digest`。
 - 写入前先写临时文件再 `rename`，避免中断损坏文件。
 - 文件权限沿用原文件；新建时 `0644`。

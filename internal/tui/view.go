@@ -85,45 +85,57 @@ func newDelegate() list.DefaultDelegate {
 }
 
 func buildItems(services []docker.Service, st *store.Store) []serviceItem {
-	byName := make(map[string]docker.Service, len(services))
-	for _, svc := range services {
-		byName[svc.Name] = svc
+	type row struct {
+		svc      docker.Service
+		recorded string
+		order    int
+		matched  bool
 	}
 
-	// 记录文件存在时，优先按文件中的定义顺序排列，其余服务再按名称排序。
-	ordered := make([]docker.Service, 0, len(services))
-	seen := make(map[string]bool, len(services))
+	// 记录文件中的定义顺序（compose 文件为 services 下的顺序）。
+	orderOf := map[string]int{}
 	if st != nil {
-		for _, name := range st.Order() {
-			svc, ok := byName[name]
-			if !ok || seen[name] {
-				continue
-			}
-			seen[name] = true
-			ordered = append(ordered, svc)
+		for i, key := range st.Order() {
+			orderOf[key] = i
 		}
 	}
 
-	rest := make([]docker.Service, 0, len(services)-len(ordered))
+	rows := make([]row, 0, len(services))
 	for _, svc := range services {
-		if !seen[svc.Name] {
-			rest = append(rest, svc)
-		}
-	}
-	sort.Slice(rest, func(i, j int) bool { return rest[i].Name < rest[j].Name })
-	ordered = append(ordered, rest...)
-
-	items := make([]serviceItem, 0, len(ordered))
-	for _, svc := range ordered {
-		it := serviceItem{svc: svc, status: statusMissing}
+		r := row{svc: svc, order: -1}
 		if st != nil {
-			if rec, ok := st.Lookup(svc.Name); ok {
-				it.recorded = rec
-				if rec == svc.Image {
-					it.status = statusInSync
-				} else {
-					it.status = statusMismatch
+			if e, ok := st.Match(svc.Name, svc.Image); ok {
+				r.matched = true
+				r.recorded = e.Image
+				if idx, ok := orderOf[e.Key]; ok {
+					r.order = idx
 				}
+			}
+		}
+		rows = append(rows, r)
+	}
+
+	// 记录文件中的服务按文件顺序在前，其余按名称排序。
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.matched != b.matched {
+			return a.matched
+		}
+		if a.matched && a.order != b.order {
+			return a.order < b.order
+		}
+		return a.svc.Name < b.svc.Name
+	})
+
+	items := make([]serviceItem, 0, len(rows))
+	for _, r := range rows {
+		it := serviceItem{svc: r.svc, status: statusMissing}
+		if r.matched && r.recorded != "" {
+			it.recorded = r.recorded
+			if r.recorded == r.svc.Image {
+				it.status = statusInSync
+			} else {
+				it.status = statusMismatch
 			}
 		}
 		items = append(items, it)
@@ -281,13 +293,19 @@ func (m *Model) viewWriteConfirm() string {
 		return m.viewList()
 	}
 
+	// 显示实际落点：compose 文件的 services.<key>.image
+	key := svc.Name
+	if e, ok := m.cfg.Store.Match(svc.Name, m.pendingImage); ok {
+		key = e.Key
+	}
+
 	rows := []string{
 		label("服务") + svc.Name,
 		label("新镜像") + shortImage(m.pendingImage),
 		"",
 		styleSub.Render("步骤 3/3 · 确认写入记录文件"),
 		"  " + m.cfg.Store.Path(),
-		"  " + svc.Name + ".image = " + m.pendingImage,
+		"  services." + key + ".image = " + m.pendingImage,
 		"",
 		styleDim.Render("esc 跳过写入（本次更新不会被记录）"),
 	}
@@ -397,9 +415,9 @@ func (m *Model) footer(keys ...string) string {
 	return truncate(help, m.lineWidth()) + "\n" + truncate(style.Render(m.toast), m.lineWidth())
 }
 
-// lineWidth 预留一列，避免写满整行时终端自动换行。
+// lineWidth 预留几列，避免写满整行或含 ⚠/⊘ 等宽度不确定字符时终端自动换行。
 func (m *Model) lineWidth() int {
-	w := m.w - 1
+	w := m.w - 3
 	if w < 10 {
 		w = 10
 	}
